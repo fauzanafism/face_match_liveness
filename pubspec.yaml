@@ -1,6 +1,7 @@
 name: face_match_liveness
-description: A Flutter plugin for face verification and liveness detection using MobileFaceNet
-  and ML Kit. Supports image-to-image and image-to-liveness comparison.
+description: A Flutter plugin for face verification and liveness detection using
+  MobileFaceNet and ML Kit. Supports image-to-image and image-to-liveness
+  comparison.
 version: 1.0.0
 repository: https://github.com/widiramadhan/face_match_liveness
 issue_tracker: https://github.com/widiramadhan/face_match_liveness/issues
@@ -11,13 +12,13 @@ environment:
 
 # Add regular dependencies here.
 dependencies:
+  camera: ^0.10.5+5
   flutter:
     sdk: flutter
-  camera: ^0.10.5+5
+  google_mlkit_face_detection: ^0.13.1
   image: ^4.1.3
   path_provider: ^2.1.1
-  tflite_flutter: ^0.11.0
-  google_mlkit_face_detection: ^0.9.0
+  tflite_flutter: ^0.12.1
 
 dev_dependencies:
   flutter_test:
