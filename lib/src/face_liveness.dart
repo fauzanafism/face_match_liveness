@@ -173,6 +173,8 @@ class _FaceLivenessState extends State<FaceLiveness> {
   bool _isWaitingToStart = true;
   bool _isInFinalCapture = false;
   bool _isFacingCamera = false;
+  bool _isCaptureDone = false;
+  bool _isStreamStopped = false;
   int _facingCameraFrames = 0;
 
   double? _previousLeftEyeOpenProbability;
@@ -221,8 +223,15 @@ class _FaceLivenessState extends State<FaceLiveness> {
 
   void _cleanup() {
     _timer?.cancel();
-    _cameraController?.stopImageStream();
+    // Jangan panggil stopImageStream lagi jika sudah dihentikan
+    if (!_isStreamStopped) {
+      try {
+        _cameraController?.stopImageStream();
+      } catch (_) {}
+      _isStreamStopped = true;
+    }
     _cameraController?.dispose();
+    _cameraController = null;
     _faceDetector.close();
   }
 
@@ -519,13 +528,18 @@ class _FaceLivenessState extends State<FaceLiveness> {
   }
 
   void _onSuccess() {
-    // Arahkan ke _onFinalCapture untuk mengambil foto terakhir
+    if (_isCaptureDone) return;
     _onFinalCapture();
   }
 
   void _onTimeout() {
     _timer?.cancel();
-    _cameraController?.stopImageStream();
+    if (!_isStreamStopped) {
+      try {
+        _cameraController?.stopImageStream();
+      } catch (_) {}
+      _isStreamStopped = true;
+    }
 
     final result = LivenessResult(
       status: LivenessResultStatus.timeout,
@@ -542,7 +556,12 @@ class _FaceLivenessState extends State<FaceLiveness> {
 
   void _onFailure(String errorMessage) {
     _timer?.cancel();
-    _cameraController?.stopImageStream();
+    if (!_isStreamStopped) {
+      try {
+        _cameraController?.stopImageStream();
+      } catch (_) {}
+      _isStreamStopped = true;
+    }
 
     final result = LivenessResult(
       status: LivenessResultStatus.failed,
@@ -559,7 +578,12 @@ class _FaceLivenessState extends State<FaceLiveness> {
 
   void _onCancel() {
     _timer?.cancel();
-    _cameraController?.stopImageStream();
+    if (!_isStreamStopped) {
+      try {
+        _cameraController?.stopImageStream();
+      } catch (_) {}
+      _isStreamStopped = true;
+    }
 
     final result = LivenessResult(
       status: LivenessResultStatus.cancelled,
@@ -604,18 +628,37 @@ class _FaceLivenessState extends State<FaceLiveness> {
   }
 
   Future<void> _onFinalCapture() async {
+    // Guard: cegah dipanggil lebih dari sekali
+    if (_isCaptureDone) return;
+    _isCaptureDone = true;
     _isProcessing = true;
     _isInFinalCapture = true;
     _timer?.cancel();
 
     try {
       // Matikan stream sebelum ambil foto
-      await _cameraController?.stopImageStream();
+      if (!_isStreamStopped) {
+        await _cameraController?.stopImageStream();
+        _isStreamStopped = true;
+      }
+
+      // Beri waktu sebentar agar stream benar-benar berhenti
+      await Future.delayed(const Duration(milliseconds: 200));
+
       // Ambil foto final
       final XFile photo = await _cameraController!.takePicture();
       _capturedImage = File(photo.path);
     } catch (e) {
       debugPrint("Gagal ambil foto final: $e");
+    }
+
+    // Dispose camera controller sebelum pop, agar resource kamera
+    // benar-benar dilepas sebelum halaman berikutnya memakainya
+    try {
+      await _cameraController?.dispose();
+      _cameraController = null;
+    } catch (e) {
+      debugPrint("Gagal dispose camera: $e");
     }
 
     final result = LivenessResult(
