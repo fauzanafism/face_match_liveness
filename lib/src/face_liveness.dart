@@ -646,20 +646,17 @@ class _FaceLivenessState extends State<FaceLiveness> {
       await Future.delayed(const Duration(milliseconds: 200));
 
       // Ambil foto final
-      final XFile photo = await _cameraController!.takePicture();
-      _capturedImage = File(photo.path);
+      if (_cameraController != null &&
+          _cameraController!.value.isInitialized) {
+        final XFile photo = await _cameraController!.takePicture();
+        _capturedImage = File(photo.path);
+      }
     } catch (e) {
       debugPrint("Gagal ambil foto final: $e");
     }
 
-    // Dispose camera controller sebelum pop, agar resource kamera
-    // benar-benar dilepas sebelum halaman berikutnya memakainya
-    try {
-      await _cameraController?.dispose();
-      _cameraController = null;
-    } catch (e) {
-      debugPrint("Gagal dispose camera: $e");
-    }
+    // Jangan dispose camera di sini — biarkan dispose() yang handle
+    // agar tidak crash saat widget masih dirender oleh framework
 
     final result = LivenessResult(
       status: LivenessResultStatus.success,
@@ -710,7 +707,9 @@ class _FaceLivenessState extends State<FaceLiveness> {
   }
 
   Widget _buildCameraPreview() {
-    if (!_isCameraInitialized) {
+    if (!_isCameraInitialized ||
+        _cameraController == null ||
+        !_cameraController!.value.isInitialized) {
       return Container(
         height: 300,
         width: 300,
