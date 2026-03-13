@@ -21,6 +21,31 @@ class FaceCompare {
     return helper;
   }
 
+  /// Membuat file gambar yang sudah di-fix orientasinya (strip EXIF)
+  /// Ini mengatasi masalah di iOS di mana InputImage.fromFile gagal
+  /// karena metadata EXIF orientasi yang tidak konsisten
+  Future<File> _fixImageOrientation(File imageFile) async {
+    try {
+      final rawBytes = await imageFile.readAsBytes();
+      final decoded = img.decodeImage(rawBytes);
+      if (decoded == null) return imageFile;
+
+      // Encode ulang sebagai JPEG — ini akan menghilangkan metadata EXIF
+      // dan memastikan pixel data sesuai orientasi visual
+      final fixedBytes = img.encodeJpg(decoded, quality: 95);
+
+      final dir = await getTemporaryDirectory();
+      final fixedFile = File(
+        '${dir.path}/fixed_${DateTime.now().millisecondsSinceEpoch}.jpg',
+      );
+      await fixedFile.writeAsBytes(fixedBytes);
+      return fixedFile;
+    } catch (e) {
+      print('⚠️ Gagal fix orientasi gambar: $e');
+      return imageFile; // fallback ke file asli
+    }
+  }
+
   /// Deteksi wajah dan crop (ambil wajah terbesar + alignment)
   Future<img.Image?> _detectAndCropFace(File imageFile) async {
     final options = FaceDetectorOptions(
@@ -29,8 +54,19 @@ class FaceCompare {
     );
     final faceDetector = FaceDetector(options: options);
 
-    final inputImage = InputImage.fromFile(imageFile);
+    // Di iOS, InputImage.fromFile sering gagal karena EXIF orientation.
+    // Solusi: re-encode gambar untuk strip EXIF metadata.
+    final File processedFile;
+    if (Platform.isIOS) {
+      processedFile = await _fixImageOrientation(imageFile);
+    } else {
+      processedFile = imageFile;
+    }
+
+    final inputImage = InputImage.fromFile(processedFile);
     final faces = await faceDetector.processImage(inputImage);
+
+    await faceDetector.close();
 
     if (faces.isEmpty) return null;
 
@@ -44,7 +80,7 @@ class FaceCompare {
     final face = faces.first;
     final boundingBox = face.boundingBox;
 
-    final rawImage = img.decodeImage(imageFile.readAsBytesSync())!;
+    final rawImage = img.decodeImage(processedFile.readAsBytesSync())!;
     var cropped = img.copyCrop(
       rawImage,
       x: boundingBox.left.toInt().clamp(0, rawImage.width - 1),
@@ -71,6 +107,13 @@ class FaceCompare {
       cropped,
       "cropped_${DateTime.now().millisecondsSinceEpoch}.jpg",
     );
+
+    // Cleanup file temporary jika dibuatkan
+    if (Platform.isIOS && processedFile.path != imageFile.path) {
+      try {
+        await processedFile.delete();
+      } catch (_) {}
+    }
 
     return cropped;
   }

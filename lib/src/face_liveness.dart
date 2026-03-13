@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -109,7 +110,6 @@ class LivenessResult {
     required this.duration,
   });
 
-  // Backward compatibility
   bool get success => status == LivenessResultStatus.success;
 }
 
@@ -126,7 +126,6 @@ class FaceLiveness extends StatefulWidget {
     this.onCancel,
   });
 
-  /// Static method to easily navigate to liveness page
   static Future<LivenessResult?> show(
     BuildContext context, {
     LivenessConfig config = const LivenessConfig(),
@@ -149,36 +148,33 @@ class FaceLiveness extends StatefulWidget {
 
 class _FaceLivenessState extends State<FaceLiveness> {
   CameraController? _cameraController;
+  CameraDescription? _cameraDescription;
   bool _isCameraInitialized = false;
   bool _isProcessing = false;
 
-  // Face detection
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
       enableContours: false,
       enableLandmarks: true,
       enableClassification: true,
       enableTracking: true,
+      performanceMode: FaceDetectorMode.accurate,
     ),
   );
 
-  // Liveness detection state
   int _currentGestureIndex = 0;
   final Set<LivenessGesture> _completedGestures = {};
   int _timeRemaining = 30;
   Timer? _timer;
-  Timer? _detectionTimer;
   DateTime? _startTime;
   String _errorMessage = '';
 
-  // Current step state
   LivenessGesture? _currentStep;
   bool _isWaitingToStart = true;
   bool _isInFinalCapture = false;
   bool _isFacingCamera = false;
   int _facingCameraFrames = 0;
 
-  // Gesture detection variables
   double? _previousLeftEyeOpenProbability;
   double? _previousRightEyeOpenProbability;
   double? _previousHeadEulerAngleY;
@@ -187,7 +183,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
   int _headShakeFrames = 0;
   int _smileFrames = 0;
 
-  // Gesture completion tracking
   bool _blinkDetected = false;
   bool _mouthOpenDetected = false;
   bool _headShakeDetected = false;
@@ -206,7 +201,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
     _initializeCamera();
     _startTimer();
 
-    // Start liveness detection after a short delay
     Timer(const Duration(seconds: 2), () {
       if (mounted) {
         setState(() {
@@ -215,7 +209,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
             _currentStep = widget.config.requiredGestures[0];
           }
         });
-        _startLivenessDetection();
       }
     });
   }
@@ -228,7 +221,7 @@ class _FaceLivenessState extends State<FaceLiveness> {
 
   void _cleanup() {
     _timer?.cancel();
-    _detectionTimer?.cancel();
+    _cameraController?.stopImageStream();
     _cameraController?.dispose();
     _faceDetector.close();
   }
@@ -246,21 +239,97 @@ class _FaceLivenessState extends State<FaceLiveness> {
         orElse: () => cameras.first,
       );
 
+      _cameraDescription = frontCamera;
+
       _cameraController = CameraController(
         frontCamera,
         ResolutionPreset.medium,
         enableAudio: false,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21
+            : ImageFormatGroup.bgra8888,
       );
 
       await _cameraController!.initialize();
 
       if (mounted) {
-        setState(() {
-          _isCameraInitialized = true;
+        setState(() => _isCameraInitialized = true);
+
+        // Langsung mulai streaming
+        _cameraController!.startImageStream((CameraImage image) {
+          if (_isProcessing || _isWaitingToStart || _isInFinalCapture) return;
+          _processStreamImage(image);
         });
       }
     } catch (e) {
       _showError('Gagal menginisialisasi kamera: $e');
+    }
+  }
+
+  InputImageRotation _rotationFromSensorOrientation(int sensorOrientation) {
+    switch (sensorOrientation) {
+      case 0:
+        return InputImageRotation.rotation0deg;
+      case 90:
+        return InputImageRotation.rotation90deg;
+      case 180:
+        return InputImageRotation.rotation180deg;
+      case 270:
+        return InputImageRotation.rotation270deg;
+      default:
+        return InputImageRotation.rotation0deg;
+    }
+  }
+
+  void _processStreamImage(CameraImage image) async {
+    _isProcessing = true;
+    try {
+      final Uint8List bytes;
+      final InputImageFormat format;
+      final InputImageRotation rotation;
+      final int bytesPerRow;
+
+      if (Platform.isIOS) {
+        // iOS: gunakan BGRA8888, plane pertama saja
+        bytes = image.planes[0].bytes;
+        format = InputImageFormat.bgra8888;
+        bytesPerRow = image.planes[0].bytesPerRow;
+      } else {
+        // Android: gunakan NV21 langsung dari plane pertama
+        // Karena kita sudah set imageFormatGroup: ImageFormatGroup.nv21
+        bytes = image.planes[0].bytes;
+        format = InputImageFormat.nv21;
+        bytesPerRow = image.planes[0].bytesPerRow;
+      }
+
+      // Ambil rotation dari sensor orientation kamera yang sebenarnya
+      if (_cameraDescription != null) {
+        rotation = _rotationFromSensorOrientation(
+          _cameraDescription!.sensorOrientation,
+        );
+      } else {
+        rotation = Platform.isIOS
+            ? InputImageRotation.rotation270deg
+            : InputImageRotation.rotation90deg;
+      }
+
+      final metadata = InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: bytesPerRow,
+      );
+
+      final inputImage = InputImage.fromBytes(bytes: bytes, metadata: metadata);
+
+      final faces = await _faceDetector.processImage(inputImage);
+      if (faces.isNotEmpty) {
+        _processFaceData(faces.first);
+      }
+    } catch (e) {
+      debugPrint("Stream Error: $e");
+    } finally {
+      _isProcessing = false;
     }
   }
 
@@ -274,43 +343,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
         _onTimeout();
       }
     });
-  }
-
-  void _startLivenessDetection() {
-    // Start real-time face detection
-    _detectionTimer = Timer.periodic(const Duration(milliseconds: 100), (
-      timer,
-    ) async {
-      if (!mounted ||
-          _isProcessing ||
-          _isWaitingToStart ||
-          !_isCameraInitialized) {
-        return;
-      }
-
-      await _detectFaceGestures();
-    });
-  }
-
-  Future<void> _detectFaceGestures() async {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      return;
-    }
-
-    try {
-      final image = await _cameraController!.takePicture();
-      _capturedImage = File(image.path);
-      final inputImage = InputImage.fromFilePath(image.path);
-      final faces = await _faceDetector.processImage(inputImage);
-
-      if (faces.isNotEmpty) {
-        final face = faces.first;
-        _processFaceData(face);
-      }
-    } catch (e) {
-      // Silently handle errors to avoid spamming
-      print('Face detection error: $e');
-    }
   }
 
   void _processFaceData(Face face) {
@@ -348,39 +380,32 @@ class _FaceLivenessState extends State<FaceLiveness> {
     final rightEyeOpen = face.rightEyeOpenProbability;
 
     if (leftEyeOpen != null && rightEyeOpen != null) {
-      // Detect eye closure (blink)
       if (_previousLeftEyeOpenProbability != null &&
           _previousRightEyeOpenProbability != null) {
-        // Eyes were open, now closed
-        if (_previousLeftEyeOpenProbability! > 0.8 &&
-            _previousRightEyeOpenProbability! > 0.8 &&
-            leftEyeOpen < 0.3 &&
-            rightEyeOpen < 0.3) {
+        // Deteksi transisi: mata terbuka → mata tertutup
+        final wasOpen = _previousLeftEyeOpenProbability! > 0.5 &&
+            _previousRightEyeOpenProbability! > 0.5;
+        final isClosed = leftEyeOpen < 0.3 && rightEyeOpen < 0.3;
+
+        if (wasOpen && isClosed) {
           _blinkCount++;
         }
 
-        // If we detected enough blinks
-        if (_blinkCount >= 2 && !_blinkDetected) {
+        if (_blinkCount >= 1 && !_blinkDetected) {
           _blinkDetected = true;
           _onGestureDetected(LivenessGesture.blink);
         }
       }
-
       _previousLeftEyeOpenProbability = leftEyeOpen;
       _previousRightEyeOpenProbability = rightEyeOpen;
     }
   }
 
   void _detectMouthOpen(Face face) {
-    // Estimate mouth opening using face landmarks
     final landmarks = face.landmarks;
     if (landmarks.isNotEmpty) {
-      // Simple mouth open detection based on face height changes
-      // In a real implementation, you'd use specific mouth landmarks
       _mouthOpenFrames++;
-
       if (_mouthOpenFrames >= 20 && !_mouthOpenDetected) {
-        // ~2 seconds at 10fps
         _mouthOpenDetected = true;
         _onGestureDetected(LivenessGesture.mouthOpen);
       }
@@ -394,7 +419,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
       if (_previousHeadEulerAngleY != null) {
         final angleDiff = (headEulerAngleY - _previousHeadEulerAngleY!).abs();
 
-        // Detect significant head movement
         if (angleDiff > 5.0) {
           _headShakeFrames++;
         }
@@ -404,7 +428,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
           _onGestureDetected(LivenessGesture.headShake);
         }
       }
-
       _previousHeadEulerAngleY = headEulerAngleY;
     }
   }
@@ -414,14 +437,12 @@ class _FaceLivenessState extends State<FaceLiveness> {
 
     if (smilingProbability != null && smilingProbability > 0.7) {
       _smileFrames++;
-
       if (_smileFrames >= 20 && !_smileDetected) {
-        // ~2 seconds
         _smileDetected = true;
         _onGestureDetected(LivenessGesture.smile);
       }
     } else {
-      _smileFrames = 0; // Reset if not smiling
+      _smileFrames = 0;
     }
   }
 
@@ -459,7 +480,7 @@ class _FaceLivenessState extends State<FaceLiveness> {
         _onFinalCapture();
       }
     } else {
-      _facingCameraFrames = 0; // Reset if not facing camera
+      _facingCameraFrames = 0;
     }
   }
 
@@ -472,8 +493,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
         _currentGestureIndex++;
         _currentStep = widget.config.requiredGestures[_currentGestureIndex];
         _resetGestureDetectionState();
-
-        // Reset timer when gesture is completed successfully
         _resetTimer();
       } else {
         _currentStep = null;
@@ -481,7 +500,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
       }
     });
 
-    // Check if all gestures completed
     if (_completedGestures.length == widget.config.requiredGestures.length) {
       _onSuccess();
     }
@@ -501,30 +519,13 @@ class _FaceLivenessState extends State<FaceLiveness> {
   }
 
   void _onSuccess() {
-    _isProcessing = true;
-    _timer?.cancel();
-    _detectionTimer?.cancel();
-
-    final result = LivenessResult(
-      status: LivenessResultStatus.success,
-      message: 'Verifikasi liveness berhasil',
-      capturedImage: _capturedImage,
-      completedGestures: _completedGestures.toList(),
-      confidence: 0.95, // Calculate based on detection confidence
-      duration: DateTime.now().difference(_startTime!),
-    );
-
-    widget.onResult(result);
-
-    // Auto close page after callback
-    if (mounted) {
-      Navigator.of(context).pop(result);
-    }
+    // Arahkan ke _onFinalCapture untuk mengambil foto terakhir
+    _onFinalCapture();
   }
 
   void _onTimeout() {
     _timer?.cancel();
-    _detectionTimer?.cancel();
+    _cameraController?.stopImageStream();
 
     final result = LivenessResult(
       status: LivenessResultStatus.timeout,
@@ -536,16 +537,12 @@ class _FaceLivenessState extends State<FaceLiveness> {
     );
 
     widget.onResult(result);
-
-    // Auto close page after callback
-    if (mounted) {
-      Navigator.of(context).pop(result);
-    }
+    if (mounted) Navigator.of(context).pop(result);
   }
 
   void _onFailure(String errorMessage) {
     _timer?.cancel();
-    _detectionTimer?.cancel();
+    _cameraController?.stopImageStream();
 
     final result = LivenessResult(
       status: LivenessResultStatus.failed,
@@ -556,18 +553,13 @@ class _FaceLivenessState extends State<FaceLiveness> {
       duration: DateTime.now().difference(_startTime!),
     );
 
-    // Call user's onResult callback
     widget.onResult(result);
-
-    // Auto close page after callback
-    if (mounted) {
-      Navigator.of(context).pop(result);
-    }
+    if (mounted) Navigator.of(context).pop(result);
   }
 
   void _onCancel() {
     _timer?.cancel();
-    _detectionTimer?.cancel();
+    _cameraController?.stopImageStream();
 
     final result = LivenessResult(
       status: LivenessResultStatus.cancelled,
@@ -578,25 +570,16 @@ class _FaceLivenessState extends State<FaceLiveness> {
       duration: DateTime.now().difference(_startTime!),
     );
 
-    // Call user's onResult callback
     widget.onResult(result);
-
-    // Auto close page after callback
-    if (mounted) {
-      Navigator.of(context).pop(result);
-    }
+    if (mounted) Navigator.of(context).pop(result);
   }
 
   void _resetTimer() {
-    // Cancel existing timer
     _timer?.cancel();
-
-    // Reset time remaining to full timeout
     setState(() {
       _timeRemaining = widget.config.timeoutSeconds;
     });
 
-    // Start new timer
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_timeRemaining > 0) {
         setState(() {
@@ -613,7 +596,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
       _errorMessage = message;
     });
 
-    // Auto-fail after showing error for 3 seconds
     Timer(const Duration(seconds: 3), () {
       if (mounted) {
         _onFailure(message);
@@ -621,23 +603,32 @@ class _FaceLivenessState extends State<FaceLiveness> {
     });
   }
 
-  void _onFinalCapture() {
+  Future<void> _onFinalCapture() async {
     _isProcessing = true;
+    _isInFinalCapture = true;
     _timer?.cancel();
-    _detectionTimer?.cancel();
+
+    try {
+      // Matikan stream sebelum ambil foto
+      await _cameraController?.stopImageStream();
+      // Ambil foto final
+      final XFile photo = await _cameraController!.takePicture();
+      _capturedImage = File(photo.path);
+    } catch (e) {
+      debugPrint("Gagal ambil foto final: $e");
+    }
 
     final result = LivenessResult(
       status: LivenessResultStatus.success,
       message: 'Verifikasi liveness berhasil',
       capturedImage: _capturedImage,
       completedGestures: _completedGestures.toList(),
-      confidence: 0.95, // Calculate based on detection confidence
+      confidence: 0.95,
       duration: DateTime.now().difference(_startTime!),
     );
 
     widget.onResult(result);
 
-    // Auto close page after callback
     if (mounted) {
       Navigator.of(context).pop(result);
     }
@@ -663,18 +654,11 @@ class _FaceLivenessState extends State<FaceLiveness> {
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            // Camera preview
             _buildCameraPreview(),
             const SizedBox(height: 24),
-
-            // Current step instruction
             _buildCurrentStepInstruction(),
             const SizedBox(height: 24),
-
-            // Timer and progress
             _buildTimerAndProgress(),
-
-            // Error message
             if (_errorMessage.isNotEmpty) _buildErrorMessage(_errorMessage),
           ],
         ),
@@ -740,7 +724,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
   }
 
   Widget _buildCurrentStepInstruction() {
-    // Show waiting message if waiting to start
     if (_isWaitingToStart) {
       return Container(
         padding: const EdgeInsets.all(20),
@@ -788,7 +771,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
       );
     }
 
-    // Show completion message if all steps done
     if (_currentStep == null &&
         _completedGestures.length == widget.config.requiredGestures.length) {
       return Container(
@@ -839,7 +821,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
       );
     }
 
-    // Show current step instruction
     if (_currentStep != null) {
       return Container(
         padding: const EdgeInsets.all(20),
@@ -852,7 +833,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
         ),
         child: Column(
           children: [
-            // Step icon
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -866,8 +846,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
               ),
             ),
             const SizedBox(height: 16),
-
-            // Step title
             Text(
               _currentStep!.displayName,
               style: TextStyle(
@@ -878,8 +856,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-
-            // Step instruction
             Text(
               _currentStep!.instruction,
               style: TextStyle(
@@ -906,7 +882,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
         ),
         child: Column(
           children: [
-            // Step icon
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -920,8 +895,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
               ),
             ),
             const SizedBox(height: 16),
-
-            // Step title
             Text(
               'Hadapkan Wajah Anda',
               style: TextStyle(
@@ -932,10 +905,8 @@ class _FaceLivenessState extends State<FaceLiveness> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-
-            // Step instruction
             Text(
-              'Hadapkan wajah Anda ke kamera dengan posisi tegak',
+              'Sedang mengambil foto terakhir...',
               style: TextStyle(
                 fontSize: 16,
                 color: widget.config.primaryColor,
@@ -954,7 +925,6 @@ class _FaceLivenessState extends State<FaceLiveness> {
   Widget _buildTimerAndProgress() {
     return Column(
       children: [
-        // Timer
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           decoration: BoxDecoration(
